@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Email Classifier</title>
+
+    <!-- Favicon to avoid 404 errors -->
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+
+    <!-- Optional: Link to CSS -->
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <h2>Email Filter Tool</h2>
+
+    <!-- Gmail OAuth Login Button -->
+    <a href="{{ url_for('main.login_router') }}">
+        <button>Connect to Gmail</button>
+    </a>
+
+    <hr>
+
+    <!-- Manual Classification Form -->
+    <form method="post">
+        <label>Email Content:</label><br>
+        <textarea name="email" rows="5" cols="40" placeholder="Paste email content here..."></textarea><br><br>
+
+        <label>IP Address (for spammer tracking):</label><br>
+        <input type="text" name="ip" placeholder="Enter IP address"><br><br>
+
+        <button type="submit">Submit</button>
+    </form>
+
+    <!-- Results Section -->
+    {% if result %}
+        <h3>Classification: {{ result }}</h3>
+        <h4>Spammer Location: {{ location }}</h4>
+    {% endif %}
+</body>
+</html>
