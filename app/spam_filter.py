@@ -12,5 +12,7 @@ def classify_email(text):
         return "Junk"
     return "Inbox"
 def is_spam(snippet, spam_keywords=None):
-    snippet = snippet.lower()
+    if not spam_keywords:
+        return False
+    snippet = snippet or ""
     return any(keyword in snippet for keyword in spam_keywords)
