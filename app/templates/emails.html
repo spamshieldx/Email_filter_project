@@ -40,9 +40,15 @@
         </tr>
         {% for email in emails %}
         <tr>
-            <td>{{ email.subject }}</td>
+            <td>{{ email['subject'] }}</td>
             <td>{{ email.sender }}</td>
-            <td>{{ email.body[:100] }}...</td>
+            <td>
+                {% if 'body' in email %}
+                {{ email['body'][:100] }}
+                {% else %}
+                <i>No Content</i>
+                {% endif %}
+            </td>
             <td>{{ email.ip }}</td>
         </tr>
         {% endfor %}
@@ -65,7 +71,8 @@
             <td>{{ email.ip }}</td>
             <td>{{ email.label }}</td>
         </tr>
-        {% end for %}
+        {% endfor %}
 </table>
 </body>
 </html>
+
