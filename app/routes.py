@@ -1,7 +1,7 @@
 from flask import Blueprint, request, render_template, session, redirect, url_for
 from .spam_filter import classify_email, is_spam
 from .ip_locator import locate_ip, extract_sender_ip
-from .gmail_service import get_gmail_service, fetch_messages, get_message_details, login, oauth2callback as oauth2callback_handler, read_emails
+from .gmail_service import get_gmail_service, fetch_messages, get_message_details, login, oauth2callback as oauth2callback_handler
 
 main = Blueprint('main', __name__)
 
@@ -30,6 +30,8 @@ def oauth2callback():
 
 @main.route('/inbox_view')
 def inbox_view():
+    inbox = []
+    spam = []
     if 'credentials' not in session:
         return redirect(url_for('main.login'))
 
@@ -40,12 +42,24 @@ def inbox_view():
     email_data = []
 
     for msg in messages:
-        headers, snippet = get_message_details(service, msg['id'])
+        headers, snippet, payload = get_message_details(service, msg['id'])
         ip = extract_sender_ip(headers)
 
         # Classify email
-        label = 'Inbox' if 'university' in snippet.lower() else 'Spam' if is_spam(snippet) else 'Inbox'
+        snippet = snippet or ""
 
+        # Classification
+        if 'university' in snippet.lower():
+            label = 'Inbox'
+        elif is_spam(snippet):
+            label = 'Spam'
+        else:
+            label = 'Inbox'
+
+        if label == 'Inbox':
+            inbox.append((headers, snippet))
+        else:
+            spam.append((headers, snippet))
         # Locate IP only for spam
         location = locate_ip(ip) if label == 'Spam' else 'N/A'
 
@@ -57,4 +71,3 @@ def inbox_view():
         })
 
     return render_template('emails.html', emails=email_data)
-    return render_template('emails.html')
