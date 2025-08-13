@@ -5,77 +5,60 @@ from flask import redirect, request, session, url_for
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
 
 # ✅ Allow HTTP for local development (disable in production)
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
-# OAuth configuration
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 CLIENT_SECRETS_FILE = 'credentials.json'
 
 
-# Step 1: Login route — initiates OAuth flow
+# Step 1: Login route
 def login():
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE,
-        scopes=SCOPES
-    )
-
-    # ✅ Matches route defined in routes.py
+    flow = Flow.from_client_secrets_file(CLIENT_SECRETS_FILE, scopes=SCOPES)
     flow.redirect_uri = url_for('main.oauth2callback', _external=True)
 
     authorization_url, _ = flow.authorization_url(
         access_type='offline',
+        prompt='consent',
         include_granted_scopes='true'
     )
     return redirect(authorization_url)
 
 
-# Step 2: Callback route — handles token exchange after consent
+# Step 2: OAuth callback
 def oauth2callback():
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, scopes=SCOPES
-    )
+    flow = Flow.from_client_secrets_file(CLIENT_SECRETS_FILE, scopes=SCOPES)
     flow.redirect_uri = url_for('main.oauth2callback', _external=True)
-
-    # ⚠️ Important: get token from redirected URL
     flow.fetch_token(authorization_response=request.url)
 
     creds = flow.credentials
-
-    # Store credentials in session
-    session['credentials'] = {
-        'token': creds.token,
-        'refresh_token': creds.refresh_token,
-        'token_uri': creds.token_uri,
-        'client_id': creds.client_id,
-        'client_secret': creds.client_secret,
-        'scopes': creds.scopes
-    }
+    session['credentials'] = creds_to_dict(creds)
 
     return redirect(url_for('main.inbox_view'))
 
 
-# Step 3: Read emails
 def read_emails():
     if 'credentials' not in session:
-        # ✅ Use correct route name
         return redirect(url_for('main.login_router'))
 
     creds = Credentials(**session['credentials'])
+
+    if not creds.valid and creds.refresh_token:
+        creds.refresh(Request())
+        session['credentials'] = creds_to_dict(creds)
+
     service = build('gmail', 'v1', credentials=creds)
-    results = service.users().messages().list(userId='me', maxResults=10).execute()
-    messages = results.get('messages', [])
+    messages = fetch_messages(service)
 
     email_data = []
     for msg in messages:
-        msg_detail = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
-        headers = msg_detail['payload']['headers']
-
+        headers, snippet , payload = get_message_details(service, msg['id'])
         subject = next((h['value'] for h in headers if h['name'] == 'Subject'), '')
         sender = next((h['value'] for h in headers if h['name'] == 'From'), '')
-        body = extract_email_body(msg_detail)
-        ip = extract_ip_address(headers)
+        body = extract_email_body_from_payload(payload)
+        ip = extract_ip_from_headers(headers)
 
         email_data.append({
             'subject': subject,
@@ -87,39 +70,62 @@ def read_emails():
     return email_data
 
 
-# Step 4: Extract plain text from body
-def extract_email_body(msg_detail):
-    try:
-        parts = msg_detail['payload'].get('parts', [])
-        for part in parts:
-            if part.get('mimeType') == 'text/plain' and 'data' in part.get('body', {}):
-                return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
-        if msg_detail['payload'].get('mimeType') == 'text/plain':
-            return base64.urlsafe_b64decode(msg_detail['payload']['body']['data']).decode('utf-8')
-    except Exception as e:
-        return f"Error extracting body: {e}"
-    return ""
+def extract_email_body_from_payload(payload):
+    def _extract_from_part(part):
+        mime = part.get('mimeType', '')
+        if mime == 'text/plain' and part.get('body', {}).get('data'):
+            return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='replace')
+        for sub in part.get('parts', []):
+            text = _extract_from_part(sub)
+            if text:
+                return text
+        return None
+
+    parts = payload.get('parts', [])
+    if parts:
+        for p in parts:
+            text = _extract_from_part(p)
+            if text:
+                return text
+
+    body = payload.get('body', {}).get('data')
+    if body:
+        return base64.urlsafe_b64decode(body).decode('utf-8', errors='replace')
+
+    return ''
 
 
-# Step 5: Extract IP
-def extract_ip_address(headers):
-    received_headers = [h['value'] for h in headers if h['name'] == 'Received']
-    if received_headers:
-        match = re.search(r'\[(\d+\.\d+\.\d+\.\d+)]', received_headers[-1])
-        if match:
-            return match.group(1)
-    return "Unknown"
+def extract_ip_from_headers(headers):
+    received = [h['value'] for h in headers if h['name'].lower() == 'received']
+    for header in reversed(received):  # earliest first
+        m = re.search(r'\[?(\d{1,3}(?:\.\d{1,3}){3})]?', header)
+        if m:
+            return m.group(1)
+    return 'Unknown'
+
+
+def creds_to_dict(creds):
+    return {
+        'token': creds.token,
+        'refresh_token': creds.refresh_token,
+        'token_uri': creds.token_uri,
+        'client_id': creds.client_id,
+        'client_secret': creds.client_secret,
+        'scopes': creds.scopes
+    }
+
 def get_gmail_service(token_info):
     creds = Credentials.from_authorized_user_info(token_info)
-    service = build('gmail', 'v1', credentials=creds)
-    return service
+    return build('gmail', 'v1', credentials=creds)
+
 def fetch_messages(service, max_results=10):
-    results = service.users().message().list(userId='me', maxResult=max_results).execute()
-    messages = results.get('messages', [])
-    return messages
+    results = service.users().messages().list(userId='me', maxResults=max_results).execute()
+    return results.get('messages', [])
+
+
 def get_message_details(service, message_id):
-    msg = service.users().messages().get(userId='me', id=message_id, formate='full').execute()
+    msg = service.users().messages().get(userId='me', id=message_id).execute()
     payload = msg.get('payload', {})
-    header = payload.get('header', {})
-    snippet = msg.get('snippet')
-    return header,snippet
+    headers = payload.get('headers', [])
+    snippet = msg.get('snippet', '') or ''
+    return headers, snippet, payload
