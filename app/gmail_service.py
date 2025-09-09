@@ -1,6 +1,4 @@
 import os
-import base64
-import re
 from flask import redirect, request, session, url_for
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -9,9 +7,8 @@ from google.auth.transport.requests import Request
 
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 CLIENT_SECRETS_FILE = 'credentials.json'
-
 
 def creds_to_dict(creds):
     return {
@@ -58,3 +55,15 @@ def get_message_details(service, message_id):
     headers = payload.get('headers', [])
     snippet = msg.get('snippet', '') or ''
     return headers, snippet, payload
+
+def modify_labels(service, msg_id, classification):
+    if classification.upper() == "SPAM":
+        body = {"removeLabelIds": ["INBOX"], "addLabelIds": ["SPAM"]}
+    else:
+        body = {"addLabelIds": ["INBOX"], "removeLabelIds": ["SPAM"]}
+    service.users().messages().modify(
+        userId='me',
+        id=msg_id,
+        body=body
+    ).execute()
+
