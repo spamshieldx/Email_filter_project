@@ -1,20 +1,42 @@
-def classify_email(text):
-    university_keywords = ['university', 'professor','congratulations', 'course', 'exam', 'semester', 'department']
-    spam_keywords = ['cash prize', 'win now', 'click here', 'congratulations', 'lottery', 'urgent',
-                     'phone', 'links', 'card details', 'otp', 'link', 'credentials', 'details', 'you won']
-    junk_keywords = ['zee5', 'hotstar', 'netflex']
+def classify_email(subject: str, body: str, sender: str) -> str:
 
-    text_lower = text.lower()
+    spam_keywords = [
+        'cash prize', 'win now', 'click here', 'lottery', 'urgent', 'you won',
+        'reward', 'claim now', 'gift card', 'free iphone', 'verify account',
+        'card details', 'otp', 'credentials', 'limited time', 'offer'
+    ]
+    ott_keywords = [
+        'hotstar', 'zee5', 'netflix', 'prime video', 'sony liv', 'aha', 'voot'
+    ]
+    phishing_keywords = [
+        'password', 'bank', 'account locked', 'ssn', 'credit card', 'wire transfer',
+        'payment link', 'reset password'
+    ]
+    university_keywords = [
+        'university', 'professor', 'course', 'exam', 'semester', 'department',
+        'registrar', 'admissions'
+    ]
+    university_domains = ['.edu', '@college.edu', '@university.edu']
+
+    text_lower = f"{subject} {body}".lower().strip()
+    sender_lower = sender.lower()
+
+    # Edge case: empty email → suspicious
+    if not text_lower and not sender_lower:
+        return 'SPAM'
+
+    # University → INBOX
+    if any(sender_lower.endswith(dom) or dom in sender_lower for dom in university_domains):
+        return 'INBOX'
     if any(word in text_lower for word in university_keywords):
-        return "Inbox"
-    elif any(word in text_lower for word in spam_keywords):
-        return "Spam"
-    elif any(word in text_lower for word in junk_keywords):
-        return "Junk"
-    return "Inbox"
+        return 'INBOX'
 
-def classify_spam(snippet):
-    spam_keywords = ['cash prize', 'win now', 'click here', 'congratulations', 'lottery', 'urgent',
-                     'phone', 'links', 'card details', 'otp', 'link', 'credentials', 'details', 'you won']
-    snippet = (snippet or "").lower()
-    return any(keyword in snippet for keyword in spam_keywords)
+    # OTT / spam / phishing → SPAM
+    if any(word in text_lower for word in ott_keywords):
+        return 'SPAM'
+    if any(word in text_lower for word in spam_keywords):
+        return 'SPAM'
+    if any(word in text_lower for word in phishing_keywords):
+        return 'SPAM'
+
+    return 'INBOX'
