@@ -28,7 +28,7 @@ def classify_email_route():
 
     label = classify_email(subject, body, sender)
     current_app.logger.info(f"Classified email from {sender} → {label}")
-    return jsonify({"folder": label})
+    return jsonify({"folder": label, "folder_type": label})
 
 @main.route('/login')
 def login_route():
@@ -58,7 +58,9 @@ def inbox_view():
         label = classify_email(subject, snippet, sender)
         location = locate_ip(ip) if label == 'SPAM' else 'N/A'
 
-        current_app.logger.info(f"Processed email from {sender} | Subject: {subject} | Label: {label} | IP: {ip} | Location: {location}")
+        current_app.logger.info(
+            f"Processed email from {sender} | Subject: {subject} | Label: {label} | IP: {ip} | Location: {location}"
+        )
 
         email_data.append({
             'subject': subject,
@@ -66,7 +68,8 @@ def inbox_view():
             'snippet': snippet,
             'ip': ip,
             'label': label,
-            'location': location
+            'location': location,
+            'folder_type': label   # ✅ added folder_type
         })
 
     return jsonify(emails=email_data)
@@ -79,15 +82,25 @@ def process_emails():
     service = get_gmail_service(session['credentials'])
     messages = fetch_messages(service)
 
+    processed_emails = []
     changed = 0
+
     for m in messages:
         headers, snippet, _ = get_message_details(service, m['id'])
         subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), "")
         sender = next((h['value'] for h in headers if h['name'].lower() == 'from'), "")
         label = classify_email(subject, snippet or "", sender)
+
         modify_labels(service, m['id'], label)
         changed += 1
 
         current_app.logger.info(f"Updated Gmail labels for {sender} → {label}")
 
-    return jsonify({"processed": changed})
+        processed_emails.append({
+            "subject": subject,
+            "sender": sender,
+            "label": label,
+            "folder_type": label
+        })
+
+    return jsonify({"processed": changed, "emails": processed_emails})
