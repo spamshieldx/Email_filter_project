@@ -1,42 +1,63 @@
-def classify_email(subject: str, body: str, sender: str) -> str:
+def classify_email(subject, body, sender, headers=None):
+    """
+    Classify emails into INBOX or SPAM based on sender, content, and headers.
 
-    spam_keywords = [
-        'cash prize', 'win now', 'click here', 'lottery', 'urgent', 'you won',
-        'reward', 'claim now', 'gift card', 'free iphone', 'verify account',
-        'card details', 'otp', 'credentials', 'limited time', 'offer'
-    ]
-    ott_keywords = [
-        'hotstar', 'zee5', 'netflix', 'prime video', 'sony liv', 'aha', 'voot'
-    ]
-    phishing_keywords = [
-        'password', 'bank', 'account locked', 'ssn', 'credit card', 'wire transfer',
-        'payment link', 'reset password'
-    ]
-    university_keywords = [
-        'university', 'professor', 'course', 'exam', 'semester', 'department',
-        'registrar', 'admissions'
-    ]
-    university_domains = ['.edu', '@college.edu', '@university.edu']
+    Parameters:
+        subject (str | None): Email subject
+        body (str | None): Email body
+        sender (str | None): Sender email address
+        headers (list[dict] | dict | str | None): Optional email headers
 
-    text_lower = f"{subject} {body}".lower().strip()
-    sender_lower = sender.lower()
+    Returns:
+        str: "INBOX" or "SPAM"
+    """
+    try:
+        # Ensure inputs are strings
+        subject = (subject or "") if not isinstance(subject, dict) else ""
+        body = (body or "") if not isinstance(body, dict) else ""
+        sender = (sender or "") if not isinstance(sender, dict) else ""
 
-    # Edge case: empty email → suspicious
-    if not text_lower and not sender_lower:
-        return 'SPAM'
+        # Normalize to lower for checks
+        subject_l = subject.lower()
+        body_l = body.lower()
+        sender_l = sender.lower()
 
-    # University → INBOX
-    if any(sender_lower.endswith(dom) or dom in sender_lower for dom in university_domains):
-        return 'INBOX'
-    if any(word in text_lower for word in university_keywords):
-        return 'INBOX'
+        # 0️⃣ Empty email check (body or subject empty)
+        if not subject_l.strip() and not body_l.strip():
+            return "SPAM"
 
-    # OTT / spam / phishing → SPAM
-    if any(word in text_lower for word in ott_keywords):
-        return 'SPAM'
-    if any(word in text_lower for word in spam_keywords):
-        return 'SPAM'
-    if any(word in text_lower for word in phishing_keywords):
-        return 'SPAM'
+        # 1️⃣ University email heuristic
+        # Accept all university-related domains and any ".edu"
+        university_domains = ["university.edu", "college.edu", "institute.edu", "uni.edu", ".edu"]
+        if any(domain in sender_l for domain in university_domains):
+            return "INBOX"
 
-    return 'INBOX'
+        # 2️⃣ Spam keywords heuristic
+        spam_keywords = [
+            "cash prize", "winner", "reward", "subscribe now", "free", "hotstar", "ott", "lottery", "claim now", "claim your prize"
+        ]
+        content = f"{subject_l} {body_l}"
+        if any(keyword in content for keyword in spam_keywords):
+            return "SPAM"
+
+        # 3️⃣ Device header heuristic: block smartwatches
+        if headers:
+            # Convert headers to a list of dicts if needed
+            if isinstance(headers, dict):
+                headers = [headers]
+            elif isinstance(headers, str):
+                parts = headers.split(":", 1)
+                headers = [{"name": parts[0].strip(), "value": parts[1].strip()}] if len(parts) == 2 else []
+
+            for h in headers:
+                if isinstance(h, dict):
+                    name = (h.get('name') or "").lower()
+                    value = (h.get('value') or "").lower()
+                    if name in ('user-agent', 'x-device', 'x-mailer') and any(dev in value for dev in ('watch', 'applewatch', 'fitbit', 'garmin')):
+                        return "SPAM"
+
+        # Default fallback
+        return "INBOX"
+    except Exception:
+        # In case of unexpected input, treat as spam (safe default)
+        return "SPAM"
