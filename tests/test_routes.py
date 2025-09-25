@@ -30,6 +30,8 @@ def test_bulk_classification(client):
         {"email_subject": "Exam Notification", "email_body": "Semester exam schedule", "sender": "exam@dept.edu"},
         {"email_subject": "Claim Now", "email_body": "Click to claim your prize", "sender": "spammy@promo.com"},
         {"email_subject": "Admissions Open", "email_body": "Apply for new semester", "sender": "admissions@uni.edu"},
+        # ✅ Added explicitly to make 20+
+        {"email_subject": "Faculty Seminar", "email_body": "Upcoming department seminar", "sender": "faculty@university.edu"},
     ]
 
     results = []
@@ -41,7 +43,8 @@ def test_bulk_classification(client):
         assert "folder_type" in data
         results.append({"email": email, "classified_as": data["folder"]})
 
-    assert len(results) >= 20
+    # Now explicitly 20 dummy emails
+    assert len(results) == 20
 
     # Print output for debug (pytest -s will show)
     for r in results:
