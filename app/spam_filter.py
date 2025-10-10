@@ -1,3 +1,5 @@
+# /mnt/data/spam_filter.py
+
 def classify_email(subject, body, sender, headers=None):
     """
     Classify emails into INBOX or SPAM based on sender, content, and headers.
