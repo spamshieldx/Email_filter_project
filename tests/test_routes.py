@@ -49,3 +49,4 @@ def test_bulk_classification(client):
     # Print output for debug (pytest -s will show)
     for r in results:
         print(r)
+
