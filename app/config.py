@@ -15,3 +15,4 @@ class DevConfig(BaseConfig):
 
 class ProdConfig(BaseConfig):
     DEBUG = False
+
