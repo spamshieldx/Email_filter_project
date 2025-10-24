@@ -1,7 +1,6 @@
 import re
 import requests
-from flask import current_app
-
+from flask import current_app, has_app_context
 # Patterns
 IPV4_PATTERN = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
 IPV6_PATTERN = r'\b(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}\b'
@@ -61,34 +60,62 @@ def extract_sender_ip(headers):
         current_app.logger.exception("Error parsing headers for IP")
     return None
 
+from flask import current_app, has_app_context
+import requests
+
 def locate_ip(ip):
     """
     Query ip-api.com for ip geolocation. Returns dict:
       {"ip": ip, "city": "...", "country": "..."} or None on failure.
     Uses current_app.cache when available.
+    Works both inside and outside Flask context.
     """
     if not ip:
         return None
 
-    # check cache
-    cache = getattr(current_app, 'cache', None)
+    # ✅ Safe cache handling
+    cache = None
+    if has_app_context():
+        cache = getattr(current_app, 'cache', None)
+
+    # Check cache if available
     if cache:
         cached = cache.get(f"iploc:{ip}")
         if cached:
             return cached
 
     try:
-        resp = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,city,query", timeout=5)
+        # ✅ Use HTTPS for reliability
+        resp = requests.get(
+            f"https://ip-api.com/json/{ip}?fields=status,message,country,city,query,lat,lon",
+            timeout=5
+        )
+
         if resp.status_code == 200:
             data = resp.json()
             if data.get('status') == 'success':
-                result = {"ip": data.get('query'), "city": data.get('city') or None, "country": data.get('country') or None}
+                result = {
+                    "ip": data.get('query'),
+                    "city": data.get('city') or None,
+                    "country": data.get('country') or None
+                }
+
                 if cache:
                     cache.set(f"iploc:{ip}", result)
                 return result
             else:
-                current_app.logger.info(f"ip-api returned failure for {ip}: {data.get('message')}")
-    except requests.RequestException:
-        current_app.logger.exception(f"ip-api request failed for {ip}")
+                if has_app_context():
+                    current_app.logger.info(
+                        f"ip-api returned failure for {ip}: {data.get('message')}"
+                    )
+
+    except requests.RequestException as e:
+        if has_app_context():
+            current_app.logger.exception(f"ip-api request failed for {ip}: {e}")
 
     return None
+
+def is_suspicious_device(ip):
+    # Example IP range patterns for smartwatch or IoT devices
+    watch_ip_patterns = ["172.16.", "192.0.2.", "198.51.100."]
+    return any(ip.startswith(p) for p in watch_ip_patterns)
