@@ -1,0 +1,29 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Email Filter Project API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/fetch_all_emails": {
+      "get": {
+        "summary": "Fetch emails"
+      }
+    },
+    "/classify": {
+      "post": {
+        "summary": "Classify an email"
+      }
+    },
+    "/download_csv": {
+      "get": {
+        "summary": "Download CSV of emails"
+      }
+    },
+    "/block_ip": {
+      "post": {
+        "summary": "Block an IP address"
+      }
+    }
+  }
+}
