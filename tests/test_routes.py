@@ -50,3 +50,4 @@ def test_bulk_classification(client):
     for r in results:
         print(r)
 
+
