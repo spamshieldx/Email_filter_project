@@ -1,9 +1,15 @@
-from flask import Blueprint, request, session, redirect, url_for, jsonify, current_app
+from flask import Blueprint, request, session, redirect, url_for, jsonify, current_app, Response
+import requests
+from datetime import datetime
+
+from .dummy_data import generate_dummy_emails
 from .spam_filter import classify_email
 from .ip_locator import locate_ip, extract_sender_ip
+from google.oauth2.credentials import Credentials
+from flask import Flask, send_file
 from .gmail_service import (
     get_gmail_service, fetch_messages, get_message_details, modify_labels,
-    login, oauth2callback as oauth2callback_handler
+    login, oauth2callback as oauth2callback_handler, revoke_and_clear
 )
 from collections import Counter
 from werkzeug.exceptions import BadRequest
@@ -15,7 +21,7 @@ main = Blueprint('main', __name__)
 def api_error(message="bad_request", code=400):
     return jsonify({"error": message}), code
 
-@main.route('/health', methods=['GET'])
+@main.route("/api/health", methods=['GET'])
 def health():
     return jsonify(status='ok')
 
@@ -23,7 +29,7 @@ def health():
 def index_get():
     return jsonify({"message": "Welcome to Email Filter API"})
 
-@main.route('/classify', methods=['POST'])
+@main.route("/api/classify", methods=['POST'])
 def classify_email_route():
     """
     Classify a single email. (Same contract as before)
@@ -50,6 +56,9 @@ def classify_email_route():
 
     ip = None
     location = None
+    folder_type = label
+    reason = None
+
     try:
         ip = extract_sender_ip(headers)
         if ip:
@@ -58,27 +67,62 @@ def classify_email_route():
                 city = loc_info.get("city")
                 country = loc_info.get("country")
                 location = f"{city}, {country}" if city and country else (country or None)
+
+            # Check for suspicious device IP (custom logic)
+            from .security_utils import is_suspicious_device  # Import helper safely
+            if is_suspicious_device(ip):
+                folder_type = "blocked"
+                reason = "Blocked Smart Watch IP"
+                current_app.logger.warning(f"🚨 Suspicious device detected — IP {ip} blocked.")
     except Exception:
         current_app.logger.exception("Failed to extract or locate IP for /classify")
 
     return jsonify({
         "folder": label,
-        "folder_type": label,
+        "folder_type": folder_type,
         "ip": ip,
-        "location": location
+        "location": location,
+        "reason": reason
     })
 
-@main.route('/login')
-def login_route():
-    try:
-        return login()
-    except Exception:
-        current_app.logger.exception("Login route failed")
-        return api_error("login_failed", 500)
 
-@main.route('/oauth2callback')
+@main.route("/api/login", methods=["GET"])
+def api_login():
+    """
+    API endpoint for login simulation or Gmail redirect.
+    For now, just mark the user session as active for testing.
+    """
+    try:
+        session["user"] = "demo_user"
+        current_app.logger.info("User session created for demo_user")
+        return jsonify({"success": True, "message": "User logged in successfully"})
+    except Exception as e:
+        current_app.logger.exception("Login route failed")
+        return jsonify({"error": f"login_failed: {e}"}), 500
+
+
+@main.route("/login", methods=["GET"])
+def legacy_login_redirect():
+    """
+    Backward compatible route (redirects to /api/login).
+    """
+    return redirect(url_for("main.api_login"))
+
+@main.route("/api/oauth2callback")
 def oauth2callback():
-    return oauth2callback_handler()
+    """
+    Handles Google OAuth callback, stores Gmail credentials in session,
+    then redirects to React Inbox page instead of raw JSON view.
+    """
+    try:
+        oauth2callback_handler()
+        current_app.logger.info(" Gmail OAuth successful — redirecting to frontend inbox page")
+        # Redirect to React Inbox Page
+        return redirect("http://localhost:5173/inbox")
+    except Exception as e:
+        current_app.logger.exception("OAuth2 callback failed")
+        return jsonify({"error": "oauth2_failed", "details": str(e)}), 500
+
 
 def _get_pagination_params(default_page_size=20):
     page = request.args.get("page", 1)
@@ -93,101 +137,139 @@ def _get_pagination_params(default_page_size=20):
         page_size = default_page_size
     return page, page_size
 
-@main.route('/inbox_view', methods=['GET'])
+@main.route("/api/inbox_view", methods=['GET'])
 def inbox_view():
     """
-    Fetch messages and return classification + ip + location. Does NOT change labels.
-    Supports pagination: ?page=1&page_size=20
+    Inbox view that returns classified emails.
+    If user is not logged in, return 401 JSON instead of redirect.
     """
-    if 'credentials' not in session:
-        return redirect(url_for('main.login_route'))
+    if "user" not in session and "credentials" not in session:
+        return jsonify({"error": "unauthorized"}), 401
 
+    # If Gmail connected, fetch from Gmail; else return demo emails
     try:
-        service = get_gmail_service(session.get('credentials'))
-    except Exception:
-        current_app.logger.exception("Failed to build Gmail service")
-        return api_error("invalid_credentials", 401)
+        if "credentials" in session:
+            service = get_gmail_service(session["credentials"])
+            messages = fetch_messages(service, max_results=10)
+            email_data = []
 
-    max_fetch = current_app.config.get('MAX_FETCH_MESSAGES', 20)
-    # For pagination we fetch up to MAX_FETCH_MESSAGES and then paginate server-side
-    messages = fetch_messages(service, max_results=max_fetch)
+            for msg in messages:
+                headers, snippet, _ = get_message_details(service, msg["id"])
+                subject = next((h["value"] for h in headers if h["name"].lower() == "subject"), "")
+                sender = next((h["value"] for h in headers if h["name"].lower() == "from"), "")
+                sender_norm = normalize_sender(sender)
+                label = classify_email(subject, snippet, sender_norm, headers=headers)
+                ip = extract_sender_ip(headers)
+                location = locate_ip(ip) if ip else None
 
-    email_data = []
-    for msg in messages:
-        headers, snippet, _ = get_message_details(service, msg['id'])
-        snippet = snippet or ""
-        subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), "")
-        sender_raw = next((h['value'] for h in headers if h['name'].lower() == 'from'), "")
-        sender = normalize_sender(sender_raw)
-        if not sender:
-            continue
+                email_data.append({
+                    "id": msg["id"],
+                    "subject": subject or "(No Subject)",
+                    "sender": sender_norm,
+                    "ip": ip,
+                    "folder_type": label,
+                    "location": location.get("city") if isinstance(location, dict) else "Unknown"
+                })
+        else:
+            # Demo emails for manual login users
+            email_data = [
+                {
+                    "subject": "Welcome to the University",
+                    "sender": "admin@university.edu",
+                    "ip": "127.0.0.1",
+                    "folder_type": "INBOX",
+                    "location": "Localhost"
+                },
+                {
+                    "subject": "Claim your prize now!",
+                    "sender": "spammer@fake.com",
+                    "ip": "203.0.113.45",
+                    "folder_type": "SPAM",
+                    "location": "Unknown"
+                }
+            ]
 
-        ip = extract_sender_ip(headers)
-        label = classify_email(subject, snippet, sender, headers=headers)
-        location_info = locate_ip(ip) if ip and label == 'SPAM' else None
-        location = f"{location_info.get('city')}, {location_info.get('country')}" if location_info else (None if ip else "N/A")
+        return jsonify({"emails": email_data})
+    except Exception as e:
+        current_app.logger.exception("Inbox view failed")
+        return api_error(f"inbox_error: {e}", 500)
 
-        email_data.append({
-            'id': msg['id'],
-            'subject': subject,
-            'sender': sender,
-            'snippet': snippet,
-            'ip': ip,
-            'label': label,
-            'location': location,
-            'folder_type': label
-        })
-
-    # paginate
-    page, page_size = _get_pagination_params(default_page_size=20)
-    page_items, meta = paginate_list(email_data, page, page_size)
-    return jsonify({"emails": page_items, "pagination": meta})
-
-@main.route('/fetch_all_emails', methods=['GET'])
+@main.route("/api/fetch_all_emails", methods=["GET"])
 def fetch_all_emails():
     """
-    Fetch raw Gmail emails (no classification). Supports pagination.
+    Fetch all Gmail emails (or dummy emails if not logged in with Gmail).
+    Supports pagination.
     """
-    if 'credentials' not in session:
-        return redirect(url_for('main.login_route'))
+    from .dummy_data import generate_dummy_emails  # Import inside function to avoid circular import
+
+    # Get pagination parameters
+    page = int(request.args.get("page", 1))
+    page_size = int(request.args.get("page_size", 20))
+
+    if "credentials" not in session:
+        # Generate 50 dummy emails for demo/testing mode
+        emails = generate_dummy_emails(50)
+        total = len(emails)
+        start = (page - 1) * page_size
+        end = start + page_size
+
+        paginated = emails[start:end]
+        return jsonify({
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "emails": paginated,
+            "source": "dummy_data"
+        })
 
     try:
-        service = get_gmail_service(session.get('credentials'))
+        service = get_gmail_service(session.get("credentials"))
     except Exception:
         current_app.logger.exception("Invalid credentials for fetch_all_emails")
         return api_error("invalid_credentials", 401)
 
-    max_fetch = current_app.config.get('MAX_FETCH_MESSAGES', 20)
+    max_fetch = current_app.config.get("MAX_FETCH_MESSAGES", 50)
     messages = fetch_messages(service, max_results=max_fetch)
 
     all_emails = []
     for msg in messages:
-        headers, snippet, _ = get_message_details(service, msg['id'])
+        headers, snippet, _ = get_message_details(service, msg["id"])
         snippet = snippet or ""
-        subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), "")
-        sender_raw = next((h['value'] for h in headers if h['name'].lower() == 'from'), "")
+        subject = next((h["value"] for h in headers if h["name"].lower() == "subject"), "")
+        sender_raw = next((h["value"] for h in headers if h["name"].lower() == "from"), "")
         sender = normalize_sender(sender_raw)
+
         all_emails.append({
-            "id": msg['id'],
+            "id": msg["id"],
             "threadId": msg.get("threadId", ""),
             "subject": subject,
             "sender": sender,
             "snippet": snippet,
-            "headers": headers
+            "headers": headers,
         })
 
-    page, page_size = _get_pagination_params(default_page_size=20)
-    page_items, meta = paginate_list(all_emails, page, page_size)
-    current_app.logger.info(f"Fetched {len(all_emails)} raw emails from Gmail")
-    return jsonify({"emails": page_items, "pagination": meta})
+    total = len(all_emails)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paginated = all_emails[start:end]
 
-@main.route('/process_emails', methods=['POST'])
+    current_app.logger.info(f"Fetched {len(all_emails)} raw emails from Gmail")
+
+    return jsonify({
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "emails": paginated,
+        "source": "gmail_api"
+    })
+
+@main.route("/api/process_emails", methods=['POST'])
 def process_emails():
     """
     Classify emails and update Gmail labels. Returns summary.
     """
     if 'credentials' not in session:
-        return redirect(url_for('main.login_route'))
+        return redirect(url_for('main.api_login'))
 
     try:
         service = get_gmail_service(session.get('credentials'))
@@ -241,14 +323,14 @@ def process_emails():
         "emails": processed_emails
     })
 
-@main.route('/stats', methods=['GET'])
+@main.route("/api/stats", methods=['GET'])
 def stats():
     """
     Lightweight stats: folder-wise counts + top spam countries.
     Supports ?page & ?page_size in case you want to paginate message-level info.
     """
     if 'credentials' not in session:
-        return redirect(url_for('main.login_route'))
+        return redirect(url_for('main.api_login'))
 
     try:
         max_fetch = int(request.args.get('max_fetch', current_app.config.get('MAX_FETCH_MESSAGES', 20)))
@@ -299,7 +381,7 @@ def stats():
         "pagination": meta
     })
 
-@main.route('/bulk_classify', methods=['POST'])
+@main.route("/api/bulk_classify", methods=['POST'])
 def bulk_classify():
     """
     Classify a list of emails provided in the request.
@@ -340,7 +422,7 @@ def bulk_classify():
     page_items, meta = paginate_list(results, page, page_size)
     return jsonify({"classified_emails": page_items, "total": len(results), "pagination": meta})
 
-@main.route('/ip_geolocate', methods=['POST'])
+@main.route("/api/ip_geolocate", methods=['POST'])
 def ip_geolocate():
     try:
         data = request.get_json(force=True)
@@ -357,7 +439,7 @@ def ip_geolocate():
         return jsonify({"ip": ip, "location": None, "note": "private-or-invalid-ip"}), 200
     return jsonify({"ip": ip, "location": location}), 200
 
-@main.route('/test_gmail_fetch', methods=['GET'])
+@main.route("/api/test_gmail_fetch", methods=['GET'])
 def test_gmail_fetch():
     """
     Non-destructive final Gmail fetch test.
@@ -367,7 +449,7 @@ def test_gmail_fetch():
       - max_fetch (overrides app.MAX_FETCH_MESSAGES)
     """
     if 'credentials' not in session:
-        return redirect(url_for('main.login_route'))
+        return redirect(url_for('main.api_login'))
 
     try:
         max_fetch = int(request.args.get('max_fetch', current_app.config.get('MAX_FETCH_MESSAGES', 20)))
@@ -398,10 +480,10 @@ def test_gmail_fetch():
         "errors": errors
     })
 
-@main.route('/folder_counts', methods=['GET'])
+@main.route("/api/folder_counts", methods=['GET'])
 def folder_counts():
     if 'credentials' not in session:
-        return redirect(url_for('main.login_route'))
+        return redirect(url_for('main.api_login'))
 
     service = get_gmail_service(session['credentials'])
     messages = fetch_messages(service, max_results=50)
@@ -418,10 +500,10 @@ def folder_counts():
 
 from collections import Counter
 
-@main.route('/spam_country_stats', methods=['GET'])
+@main.route("/api/spam_country_stats", methods=['GET'])
 def spam_country_stats():
     if 'credentials' not in session:
-        return redirect(url_for('main.login_route'))
+        return redirect(url_for('main.api_login'))
 
     service = get_gmail_service(session['credentials'])
     messages = fetch_messages(service, max_results=50)
@@ -442,3 +524,72 @@ def spam_country_stats():
 
     top_countries = Counter(spam_countries).most_common(5)
     return jsonify({"top_spam_countries": top_countries})
+
+from .gmail_service import revoke_and_clear
+
+@main.route("/api/logout", methods=['POST'])
+def logout():
+    """Revoke Gmail token and clear session"""
+    creds_data = session.get("credentials")
+    if creds_data:
+        creds = Credentials(**creds_data)
+        revoke = requests.post(
+            'https://oauth2.googleapis.com/revoke',
+            params={'token': creds.token},
+            headers={'content-type': 'application/x-www-form-urlencoded'}
+        )
+        if revoke.status_code == 200:
+            session.clear()
+            return jsonify({"message": "Logout successful"}), 200
+        else:
+            return jsonify({"error": "Failed to revoke token"}), 400
+    return jsonify({"message": "No active session"}), 200
+
+@main.route("/api/revoke", methods=['POST'])
+def revoke():
+    try:
+        resp = revoke_and_clear()
+        return jsonify(resp), 200
+    except Exception as e:
+        return api_error(f"revoke_failed: {e}", 500)
+
+@main.route("/api/signup", methods=["POST"])
+def signup():
+    data = request.get_json()
+    username = data.get("username")
+    email = data.get("email")
+    password = data.get("password")
+    # Normally you would save this in a database
+    current_app.logger.info(f"User signed up: {username} ({email})")
+    return jsonify({"success": True, "message": "User registered successfully"})
+
+
+@main.route("/api/login_manual", methods=["POST"])
+def login_manual():
+    data = request.json
+    username = data.get("username")
+    password = data.get("password")
+    # validate user from DB
+    if username == "admin" and password == "1234":
+        session["user"] = username
+        current_app.logger.info(f"Manual login success for {username}")
+        return jsonify({"success": True, "message": "Login successful"})
+
+    current_app.logger.warning(f"Invalid manual login attempt for {username}")
+    return jsonify({"success": False, "message": "Invalid credentials"}), 401
+
+@main.route("/docs")
+def api_docs():
+    return send_file("docs.md")
+
+@main.route("/download_csv")
+def download_csv():
+    import csv
+    from io import StringIO
+    emails = generate_dummy_emails(30)
+    si = StringIO()
+    writer = csv.DictWriter(si, fieldnames=emails[0].keys())
+    writer.writeheader()
+    writer.writerows(emails)
+    output = si.getvalue()
+    return Response(output, mimetype="text/csv", headers={"Content-Disposition": "attachment;filename=emails.csv"})
